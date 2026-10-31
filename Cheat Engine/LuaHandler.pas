@@ -4123,6 +4123,14 @@ begin
   result:=1;
 end;
 
+function speedhack_getHookReport(L: PLua_State): integer; cdecl;
+begin
+  //returns: report string (empty when speedhack isn't active), and true if some hooks failed
+  lua_pushstring(L, speedhack.HookReport);
+  lua_pushboolean(L, speedhack.HasFailures);
+  result:=2;
+end;
+
 function speedhack_setSpeed(L: PLua_State): integer; cdecl;
 var
   parameters: integer;
@@ -16435,6 +16443,7 @@ begin
     lua_register(L, 'messageDialog', messageDialog);
     lua_register(L, 'speedhack_setSpeed', speedhack_setSpeed);
     lua_register(L, 'speedhack_getSpeed', speedhack_getSpeed);
+    lua_register(L, 'speedhack_getHookReport', speedhack_getHookReport);
 
     lua_register(L, 'getAutoAttachList', getAutoAttachList);
 

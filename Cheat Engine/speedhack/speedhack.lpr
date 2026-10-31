@@ -16,18 +16,20 @@ uses
   windows,
   SysUtils,
   Classes,
-  {$ifdef USECS}
-  syncobjs,
-  {$endif}
   speedhackmain in 'speedhackmain.pas';
 
 exports InitializeSpeedhack;
 exports realGetTickCount;
 exports realGetTickCount64;
 exports realQueryPerformanceCounter;
+exports realGetSystemTimeAsFileTime;
+exports realGetSystemTimePreciseAsFileTime;
 exports speedhackversion_GetTickCount;
 exports speedhackversion_GetTickCount64;
 exports speedhackversion_QueryPerformanceCounter;
+exports speedhackversion_GetSystemTimeAsFileTime;
+exports speedhackversion_GetSystemTimePreciseAsFileTime;
+exports speedhackdllversion;
 
 exports initdll;
 

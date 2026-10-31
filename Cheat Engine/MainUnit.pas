@@ -1278,6 +1278,8 @@ resourcestring
     'You are low on diskspace on the folder where the scanresults are stored. Scanning might fail. Are you sure you want to '
     + 'continue?';
   rsIsNotAValidSpeed = '%s is not a valid speed';
+  rsSpeedhackPartiallyActive = 'Speedhack is active, but some time functions could not be hooked. Code using those won''t be sped up or slowed down.';
+  rsSpeedhackWarningMark = ' (!)';
   rsAreYouSureYouWantToEraseTheDataInTheCurrentTable =
     'Are you sure you want to erase the data in the current table?';
 
@@ -10708,6 +10710,37 @@ begin
     editSH2.Text := format('%.2f', [y]);
 end;
 
+var
+  speedhackDefaultCaption: string;
+  speedhackDefaultHint: string;
+  speedhackDefaultsSaved: boolean;
+
+procedure updateSpeedhackHookWarning;
+//no dialog on purpose: speedhack also gets enabled from lua scripts and plugins,
+//a modal popup would block those. The checkbox gets a mark and the hint the details
+begin
+  with MainForm do
+  begin
+    if not speedhackDefaultsSaved then
+    begin
+      speedhackDefaultCaption:=cbSpeedhack.Caption;
+      speedhackDefaultHint:=cbSpeedhack.Hint;
+      speedhackDefaultsSaved:=true;
+    end;
+
+    if cbSpeedhack.Checked and (speedhack<>nil) and speedhack.HasFailures then
+    begin
+      cbSpeedhack.Caption:=speedhackDefaultCaption+rsSpeedhackWarningMark;
+      cbSpeedhack.Hint:=rsSpeedhackPartiallyActive+sLineBreak+sLineBreak+speedhack.HookReport;
+    end
+    else
+    begin
+      cbSpeedhack.Caption:=speedhackDefaultCaption;
+      cbSpeedhack.Hint:=speedhackDefaultHint;
+    end;
+  end;
+end;
+
 procedure TMainForm.btnSetSpeedhack2Click(Sender: TObject);
 var
   newspeed: single;
@@ -10737,6 +10770,7 @@ begin
       //the process switched
       FreeAndNil(speedhack);  //recreate
       speedhack := TSpeedhack.Create;
+      updateSpeedhackHookWarning;
     end;
     {$endif}
 
@@ -10783,6 +10817,7 @@ begin
       FreeAndNil(speedhack);
   end;
 
+  updateSpeedhackHookWarning;
   panel14.Visible := cbSpeedhack.Checked;
 end;
 

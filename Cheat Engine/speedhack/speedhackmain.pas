@@ -4,7 +4,7 @@ unit speedhackmain;
 
 
 interface
-uses windows, classes, sysutils{$ifdef USECS},syncobjs{$endif};
+uses windows, classes, sysutils;
 
 procedure InitializeSpeedhack(speed: single); stdcall;
 
@@ -13,26 +13,15 @@ procedure InitDLL;
 type TGetTickCount=function: DWORD; stdcall;
 type TGetTickCount64=function: QWORD; stdcall;
 type TQueryPerformanceCounter=function(var x: int64): BOOL; stdcall;
+type TGetSystemTimeAsFileTime=procedure(var ft: int64); stdcall; //FILETIME is 2 dwords = one int64
 
 function speedhackversion_GetTickCount: DWORD; stdcall;
 function speedhackversion_GetTickCount64: QWORD; stdcall;
 function speedhackversion_QueryPerformanceCounter(var x: int64): BOOL; stdcall;
-
-type TSimpleLock=record
-{$ifdef USECS}
-  cs: TCriticalSection;
-{$else}
-  count: integer;
-  owner: dword;
-{$endif}
-end;
-
-procedure lock(var l: TSimpleLock);
-procedure unlock(var l: TSimpleLock);
+procedure speedhackversion_GetSystemTimeAsFileTime(var ft: int64); stdcall;
+procedure speedhackversion_GetSystemTimePreciseAsFileTime(var ft: int64); stdcall;
 
 
-//function GetTime:dword; stdcall;
-//function NewQueryPerformanceCounter(var output: int64):BOOl; stdcall;
 var CETick: dword;
     CETick64: int64;
 
@@ -44,19 +33,26 @@ var CETick: dword;
     tickerstopped: boolean;
     speedhackenabled: boolean;
 
-
-   { timeGetTimeInfo:TAPiInfo;
-    getTickcountInfo: TAPIInfo;
-    QueryPerformanceCounterInfo: TAPIInfo;  }
     winmmlib,kernel32lib: thandle;
 
     //5.5:
     confighaschanged: integer;
-    speedmultiplier: single;
+
+    //double instead of single: a single only has a 24-bit mantissa, so
+    //(elapsed ticks)*multiplier lost precision once more than ~2^24 ticks had
+    //passed since the last speed change (1.6 seconds of 10MHz QPC ticks), making
+    //the returned time advance in ever growing steps
+    speedmultiplier: double;
+
+    //pointers to trampolines that call the original (unhooked) functions.
+    //Filled in by the hook scripts Cheat Engine writes (see speedhack2.pas)
     realgettime: pointer;
     realGetTickCount: pointer;
     realGetTickCount64: pointer;
     realQueryPerformanceCounter: pointer;
+    realGetSystemTimeAsFileTime: pointer;
+    realGetSystemTimePreciseAsFileTime: pointer;
+
     initialoffset: dword;
     initialtime: dword;
     initialoffset64: int64;
@@ -65,115 +61,160 @@ var CETick: dword;
     initialoffset_tc64: QWord;
     initialtime_tc64: QWord;
 
+    initialoffset_ft: int64;
+    initialtime_ft: int64;
+    initialoffset_ftp: int64;
+    initialtime_ftp: int64;
 
-
-    GTCLock: TSimpleLock;
-    QPCLock: TSimpleLock;
+    //lets Cheat Engine tell which version of this dll is injected (old ones
+    //don't export this, or the GetSystemTime* hooks)
+    speedhackdllversion: dword=2;
 
 
 implementation
 
-procedure lock(var l: TSimpleLock);
-var tid: dword;
+var
+  //one reentrant lock for all timer state. Replaces the old hand made
+  //spinlock, which was only safe when compiled without optimizations
+  SpeedLock: TRTLCriticalSection;
+
+  //per-thread "already inside a speedhack function" flag. Some real
+  //functions call other hooked ones internally (e.g. GetSystemTimePreciseAsFileTime
+  //uses RtlQueryPerformanceCounter). Without this the inner result would be
+  //scaled and then the outer one scaled again.
+  GuardTLS: DWORD=TLS_OUT_OF_INDEXES;
+
+function EnterGuard: boolean; inline;
+var e: DWORD;
 begin
-  {$ifdef USECS}
-  l.cs.enter;
-  {$else}
-  tid:=GetCurrentThreadId;
-  if l.owner<>tid then //check if it's already locked
-  begin
-    while InterLockedExchange(l.count, 1)<>0 do sleep(0);
-    l.owner:=tid;
-  end
-  else
-    InterLockedIncrement(l.count);
-  {$endif}
+  if GuardTLS=TLS_OUT_OF_INDEXES then exit(true);
+
+  e:=GetLastError; //TlsGetValue/TlsSetValue change the last error, the caller of a time function doesn't expect that
+  result:=TlsGetValue(GuardTLS)=nil;
+  if result then
+    TlsSetValue(GuardTLS, pointer(1));
+  SetLastError(e);
 end;
 
-procedure unlock(var l: TSimpleLock);
-var c: integer;
+procedure LeaveGuard; inline;
+var e: DWORD;
 begin
+  if GuardTLS=TLS_OUT_OF_INDEXES then exit;
 
-  {$ifdef USECS}
-  l.cs.leave;
-  {$else}
-  if l.count=1 then      //disable optimization when compiling if you wish to use this code
-    l.owner:=0;
-
-  InterLockedDecrement(l.count);
-  if l.count<0 then OutputDebugString('error -1');
-  {$endif}
+  e:=GetLastError;
+  TlsSetValue(GuardTLS, nil);
+  SetLastError(e);
 end;
 
 function speedhackversion_GetTickCount: DWORD; stdcall;
 var currentTime: dword;
 begin
   //also used for timeGetTime
+  if not EnterGuard then
+    exit(TGetTickCount(realgettickcount)());
 
-  lock(GTCLock);
+  EnterCriticalSection(SpeedLock);
 
   currentTime:=TGetTickCount(realgettickcount);
   //time past since activation, mulitplied by speed multiplier
-  result:=trunc((currentTime-initialtime)*speedmultiplier)+initialoffset;
+  result:=dword(trunc(dword(currentTime-initialtime)*speedmultiplier)+initialoffset);
 
-  unlock(GTCLock);
+  LeaveCriticalSection(SpeedLock);
+  LeaveGuard;
 end;
 
 function speedhackversion_GetTickCount64: QWORD; stdcall;
 var currentTime: qword;
 begin
-  //also used for timeGetTime
+  if not EnterGuard then
+    exit(TGetTickCount64(realgettickcount64)());
 
-  lock(GTCLock);
+  EnterCriticalSection(SpeedLock);
 
   currentTime:=TGetTickCount64(realgettickcount64);
   //time past since activation, mulitplied by speed multiplier
-  result:=trunc((currentTime-initialtime_tc64)*speedmultiplier)+initialoffset_tc64;
+  result:=qword(trunc((currentTime-initialtime_tc64)*speedmultiplier))+initialoffset_tc64;
 
-  unlock(GTCLock);
+  LeaveCriticalSection(SpeedLock);
+  LeaveGuard;
 end;
 
 function speedhackversion_QueryPerformanceCounter(var x: int64): BOOL; stdcall;
 var currentTime64: int64;
     newx: int64;
 begin
-  lock(QPCLock);
+  if not EnterGuard then
+    exit(TQueryPerformanceCounter(realQueryPerformanceCounter)(x));
 
-  newx:=0;
+  EnterCriticalSection(SpeedLock);
+
   currentTime64:=0;
-
-//also used for timeGetTime
   result:=TQueryPerformanceCounter(realQueryPerformanceCounter)(currentTime64);
 
   //time past since activation, multiplied by speed multiplier
   newx:=trunc((currentTime64-initialtime64)*speedmultiplier)+initialoffset64;
 
-  unlock(QPCLock);
+  LeaveCriticalSection(SpeedLock);
+  LeaveGuard;
 
   x:=newx; //access violation possible here
+end;
+
+procedure speedhackversion_GetSystemTimeAsFileTime(var ft: int64); stdcall;
+var currentTime, newft: int64;
+begin
+  if not EnterGuard then
+  begin
+    TGetSystemTimeAsFileTime(realGetSystemTimeAsFileTime)(ft);
+    exit;
+  end;
+
+  EnterCriticalSection(SpeedLock);
+
+  currentTime:=0;
+  TGetSystemTimeAsFileTime(realGetSystemTimeAsFileTime)(currentTime);
+  newft:=trunc((currentTime-initialtime_ft)*speedmultiplier)+initialoffset_ft;
+
+  LeaveCriticalSection(SpeedLock);
+  LeaveGuard;
+
+  ft:=newft;
+end;
+
+procedure speedhackversion_GetSystemTimePreciseAsFileTime(var ft: int64); stdcall;
+var currentTime, newft: int64;
+begin
+  if not EnterGuard then
+  begin
+    TGetSystemTimeAsFileTime(realGetSystemTimePreciseAsFileTime)(ft);
+    exit;
+  end;
+
+  EnterCriticalSection(SpeedLock);
+
+  currentTime:=0;
+  TGetSystemTimeAsFileTime(realGetSystemTimePreciseAsFileTime)(currentTime);
+  newft:=trunc((currentTime-initialtime_ftp)*speedmultiplier)+initialoffset_ftp;
+
+  LeaveCriticalSection(SpeedLock);
+  LeaveGuard;
+
+  ft:=newft;
 end;
 
 procedure InitializeSpeedhack(speed: single); stdcall;
 {
 Called by createremotethread
 }
+var t: int64;
 begin
-  lock(QPCLock);
-  lock(GTCLock);
-
- // outputdebugstring(pchar(format('locked: tid=%d, lockQPC=%d (%d), lockGTC=%d (%d)',[GetThreadID, QPCLock.owner, QPCLock.count, GTCLock.owner, GTCLock.count])));
-
-  //sleep(5000);
+  EnterCriticalSection(SpeedLock); //reentrant, so the calls to the hooked functions below can take it again
 
   initialoffset:=gettickcount; //get the time the process currently sees (could be fake)
   initialtime:=TGetTickCount(realgettickcount);   //get the real time
 
- // OutputDebugString('c1');
-
-
   QueryPerformanceCounter(initialoffset64);
   TQueryPerformanceCounter(realQueryPerformanceCounter)(initialtime64);
-
 
   if realGetTickCount64<>nil then   //xp doesn't have this
   begin
@@ -181,39 +222,48 @@ begin
     initialtime_tc64:=TGetTickCount64(realGetTickCount64);
   end;
 
+  //the GetSystemTime* hooks are optional. Only touch their state when hooked.
+  //The current fake time comes from our own function (still using the old speed)
+  if realGetSystemTimeAsFileTime<>nil then
+  begin
+    speedhackversion_GetSystemTimeAsFileTime(t);
+    initialoffset_ft:=t;
+    TGetSystemTimeAsFileTime(realGetSystemTimeAsFileTime)(initialtime_ft);
+  end;
 
- // OutputDebugString('c2');
+  if realGetSystemTimePreciseAsFileTime<>nil then
+  begin
+    speedhackversion_GetSystemTimePreciseAsFileTime(t);
+    initialoffset_ftp:=t;
+    TGetSystemTimeAsFileTime(realGetSystemTimePreciseAsFileTime)(initialtime_ftp);
+  end;
+
   speedmultiplier:=speed;
 
- // OutputDebugString('d');
-  // sleep(100);
-
-   //OutputDebugString('Going to unlock');
-  // outputdebugstring(pchar(format('before unlock: tid=%d, lockQPC=%d (%d), lockGTC=%d (%d)',[GetThreadID, QPCLock.owner, QPCLock.count, GTCLock.owner, GTCLock.count])));
-
-  unlock(GTCLock);
-  unlock(QPCLock);
-
-//  outputdebugstring(pchar(format('unlocked: tid=%d, lockQPC=%d (%d), lockGTC=%d (%d)',[GetThreadID, QPCLock.owner, QPCLock.count, GTCLock.owner, GTCLock.count])));
-
- // OutputDebugString('f');
+  LeaveCriticalSection(SpeedLock);
 end;
 
 
 procedure InitDLL;
 begin
+  InitializeCriticalSectionAndSpinCount(SpeedLock, 4000);
+  GuardTLS:=TlsAlloc;
+
   speedmultiplier:=1;
   confighaschanged:=0; //not changed, speed is 1
   initialoffset:=gettickcount;
   initialtime:=initialoffset;
   QueryPerformanceCounter(initialoffset64);
   initialtime64:=initialoffset64;
-  loadlibrary('winmm.dll');
 
-  {$ifdef USECS}
-  QPCLock.cs:=TCriticalsection.create;
-  GTCLock.cs:=TCriticalSection.create;
-  {$endif}
+  //with offset=time=0 and a multiplier of 1 the GetSystemTime* hooks return the
+  //real time until InitializeSpeedhack is called
+  initialoffset_ft:=0;
+  initialtime_ft:=0;
+  initialoffset_ftp:=0;
+  initialtime_ftp:=0;
+
+  loadlibrary('winmm.dll');
 end;
 
 end.
