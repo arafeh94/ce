@@ -20,6 +20,7 @@ uses
      debuggertypedefinitions, commonTypeDefs, betterControls;
 
 const ceversion=7.5;
+{$I cebuild.inc}
 {$ifdef altname}  //i'd use $MACRO ON but fpc bugs out
   strCheatEngine='Runtime Modifier'; //if you change this, also change it in first.pas
   strCheatTable='Code Table';   //because it contains code.... duh.....
@@ -41,7 +42,7 @@ const ceversion=7.5;
 {$endif}
 
 resourcestring
-  cename = strCheatEngine+' 7.5';
+  cename = strCheatEngine+' 7.5'+cebuildname;
   rsCheatEngine = strCheatEngine;
   rsPleaseWait = 'Please Wait!';
 
